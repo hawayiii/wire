@@ -629,9 +629,9 @@ func (oc *objectCache) processNewSet(info *types.Info, pkgPath string, call *ast
 	if len(errs) > 0 {
 		return nil, errs
 	}
-	if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
-		return nil, errs
-	}
+	//if errs := verifyAcyclic(pset.providerMap, oc.hasher); len(errs) > 0 {
+	//	return nil, errs
+	//}
 	return pset, nil
 }
 

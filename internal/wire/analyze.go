@@ -33,6 +33,8 @@ const (
 	structProvider
 	valueExpr
 	selectorExpr
+
+	cyclicStructField = 8000 // 结构体里成员产生循环依赖，需要放在最后再赋值
 )
 
 // A call represents a step of an injector function.  It may be either a
@@ -88,6 +90,9 @@ type call struct {
 	// The following are only set for kind == selectorExpr:
 
 	ptrToField bool
+
+	// The following are only set for kind == cyclicStructField:
+	fieldNameMap map[string]types.Type
 }
 
 // solve finds the sequence of calls required to produce an output type
@@ -115,6 +120,19 @@ func solve(fset *token.FileSet, out types.Type, given *types.Tuple, set *Provide
 		up   *frame
 	}
 	stk := []frame{{t: out}}
+
+	var (
+		cyclicCallMap = new(typeutil.Map)
+		getTypeMap    = func(tmp *frame) *typeutil.Map { // 获取当前访问路径上的type map
+			tmpMap := new(typeutil.Map)
+			for tmp != nil {
+				tmpMap.Set(tmp.t, true)
+				tmp = tmp.up
+			}
+			return tmpMap
+		}
+	)
+
 dfs:
 	for len(stk) > 0 {
 		curr := stk[len(stk)-1]
@@ -161,8 +179,15 @@ dfs:
 			// on the stack in reverse order so that calls are added in argument
 			// order.
 			visitedArgs := true
+			curTypeMap := getTypeMap(&curr)
 			for i := len(p.Args) - 1; i >= 0; i-- {
 				a := p.Args[i]
+
+				// 记录循环依赖的结构体
+				if recordCyclicStruct(curr.t, a, set, curTypeMap, cyclicCallMap) {
+					continue
+				}
+
 				if index.At(a.Type) == nil {
 					if visitedArgs {
 						// Make sure to re-visit this type after visiting all arguments.
@@ -175,16 +200,20 @@ dfs:
 			if !visitedArgs {
 				continue
 			}
-			args := make([]int, len(p.Args))
+			args := make([]int, 0, len(p.Args))
 			ins := make([]types.Type, len(p.Args))
 			for i := range p.Args {
 				ins[i] = p.Args[i].Type
 				v := index.At(p.Args[i].Type)
+				if v == nil {
+					continue
+				}
+
 				if v == errAbort {
 					index.Set(curr.t, errAbort)
 					continue dfs
 				}
-				args[i] = v.(int)
+				args = append(args, v.(int))
 			}
 			index.Set(curr.t, given.Len()+len(calls))
 			kind := funcProviderCall
@@ -253,7 +282,49 @@ dfs:
 	if errs := verifyArgsUsed(set, used); len(errs) > 0 {
 		return nil, errs
 	}
+
+	cyclicCallMap.Iterate(func(k types.Type, v interface{}) {
+		calls = append(calls, v.(call))
+	})
+
 	return calls, nil
+}
+
+// recordCyclicStruct
+func recordCyclicStruct(structType types.Type, pInput ProviderInput, set *ProviderSet, curTypeMap, callMap *typeutil.Map) bool {
+	var (
+		fieldType = pInput.Type
+	)
+	pType := set.For(fieldType)
+	if pType.IsNil() {
+		return false
+	}
+
+	var finalType types.Type
+
+	// 当前成员是接口
+	if !types.Identical(fieldType, pType.Type()) {
+		finalType = pType.Type()
+	} else {
+		finalType = fieldType
+	}
+
+	if curTypeMap.At(finalType) == nil {
+		return false
+	}
+
+	tmpCall := call{
+		kind:         cyclicStructField,
+		out:          structType,
+		fieldNameMap: make(map[string]types.Type),
+	}
+	if callMap.At(structType) != nil {
+		tmpCall = callMap.At(structType).(call)
+	}
+	tmpCall.fieldNameMap[pInput.FieldName] = finalType
+	callMap.Set(structType, tmpCall)
+
+	return true
 }
 
 // verifyArgsUsed ensures that all of the arguments in set were used during solve.
